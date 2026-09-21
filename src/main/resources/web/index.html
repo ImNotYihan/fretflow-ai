@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Turn guitar and bass MusicXML scores into ergonomic, playable TAB fingerings.">
+  <title>FretFlow AI · MusicXML to Playable TAB</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css?v=1.0.0">
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <header class="nav shell">
+    <a class="brand" href="/" aria-label="FretFlow AI home">
+      <span class="brand-mark"><span></span><span></span><span></span></span>
+      <span>FretFlow <b>AI</b></span>
+    </a>
+    <div class="local-badge"><i></i> Local-first · No sign-in</div>
+  </header>
+
+  <main class="shell">
+    <section class="hero">
+      <div class="eyebrow">MUSICXML → PLAYABLE TAB</div>
+      <h1>Put every note<br><em>within easy reach.</em></h1>
+      <p>Upload an electric guitar or bass MusicXML score. FretFlow analyzes range, chords, and position shifts to create TAB that fits a real hand—with optional AI refinement.</p>
+    </section>
+
+    <section class="workspace" aria-label="MusicXML conversion tool">
+      <div class="panel input-panel">
+        <div class="panel-kicker"><span>01</span> Upload your score</div>
+        <label class="dropzone" id="dropzone" for="fileInput">
+          <input id="fileInput" type="file" accept=".musicxml,.xml,.mxl,application/xml">
+          <span class="upload-icon" aria-hidden="true">
+            <svg viewBox="0 0 40 40"><path d="M20 27V9m0 0-7 7m7-7 7 7M8 26v5h24v-5"/></svg>
+          </span>
+          <strong id="fileTitle">Drop a MusicXML score here</strong>
+          <span id="fileMeta">or click to choose .musicxml / .xml / .mxl · 8 MB max</span>
+        </label>
+
+        <div class="field-row">
+          <fieldset class="segmented">
+            <legend>Instrument</legend>
+            <label><input type="radio" name="instrument" value="guitar" checked><span>Electric guitar</span></label>
+            <label><input type="radio" name="instrument" value="bass"><span>Electric bass</span></label>
+          </fieldset>
+          <label class="field">
+            <span>Tuning</span>
+            <select id="tuning"></select>
+          </label>
+        </div>
+
+        <label class="field">
+          <span>Fingering style</span>
+          <select id="style">
+            <option value="balanced">Balanced · Natural position shifts</option>
+            <option value="beginner">Beginner · Open strings and low positions</option>
+            <option value="low-fret">Low position · Stay near the nut</option>
+            <option value="compact">Compact · Minimize finger stretch</option>
+          </select>
+        </label>
+
+        <div class="ai-card">
+          <div class="ai-heading">
+            <div><span class="spark">✦</span><strong>AI fingering refinement</strong><small>Optional</small></div>
+            <span class="privacy">Key is not saved</span>
+          </div>
+          <div class="field-row ai-fields">
+            <label class="field">
+              <span>Provider</span>
+              <select id="provider">
+                <option value="none">Do not use AI</option>
+                <option value="deepseek">DeepSeek</option>
+                <option value="openai">OpenAI / ChatGPT</option>
+              </select>
+            </label>
+            <label class="field" id="keyField">
+              <span>API Key</span>
+              <div class="password-wrap">
+                <input id="apiKey" type="password" autocomplete="off" spellcheck="false" placeholder="sk-…" disabled>
+                <button id="toggleKey" type="button" aria-label="Show or hide API Key" disabled>Show</button>
+              </div>
+            </label>
+          </div>
+          <details id="advancedAi">
+            <summary>Advanced settings</summary>
+            <div class="field-row advanced-grid">
+              <label class="field"><span>Model (blank uses default)</span><input id="model" type="text" placeholder="deepseek-chat" disabled></label>
+              <label class="field"><span>Compatible API URL (optional)</span><input id="baseUrl" type="url" placeholder="https://…" disabled></label>
+            </div>
+          </details>
+          <p class="key-note">Your API Key is forwarded only to the selected provider during conversion. It is never written to disk or logs. For a public deployment, disable client-side keys or add a secure key proxy.</p>
+        </div>
+
+        <button class="convert-button" id="convertButton" type="button" disabled>
+          <span id="buttonLabel">Choose a score to begin</span>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5"/></svg>
+        </button>
+        <div class="error" id="error" role="alert" hidden></div>
+      </div>
+
+      <aside class="side-note">
+        <span class="vertical-label">HOW IT WORKS</span>
+        <ol>
+          <li><b>Read</b><span>Parse parts, pitches, chords, and rhythmic positions</span></li>
+          <li><b>Map</b><span>Enumerate every pitch-correct string and fret combination</span></li>
+          <li><b>Optimize</b><span>Reduce string skips, stretches, and needless position shifts</span></li>
+          <li><b>Export</b><span>Download ASCII TAB and editable MusicXML</span></li>
+        </ol>
+      </aside>
+    </section>
+
+    <section class="results" id="results" hidden aria-live="polite">
+      <div class="result-header">
+        <div>
+          <span class="success-pill">Conversion complete</span>
+          <h2 id="resultTitle">Untitled score</h2>
+          <p id="resultMeta"></p>
+        </div>
+        <div class="actions">
+          <button class="secondary" id="copyButton" type="button">Copy TAB</button>
+          <button class="primary" id="downloadXml" type="button">Download MusicXML</button>
+        </div>
+      </div>
+
+      <div class="stats" id="stats"></div>
+      <div class="warnings" id="warnings" hidden></div>
+
+      <div class="result-grid">
+        <article class="tab-card">
+          <div class="card-title"><span>ASCII TAB</span><small>Copy it into your notes or tab library</small></div>
+          <pre id="asciiTab"></pre>
+          <button class="download-text" id="downloadTxt" type="button">↓ Download .txt</button>
+        </article>
+        <article class="map-card">
+          <div class="card-title"><span>Fingering path</span><small>String / fret</small></div>
+          <div class="event-map" id="eventMap"></div>
+        </article>
+      </div>
+    </section>
+  </main>
+
+  <footer class="shell">
+    <span>FretFlow AI</span>
+    <p>The local algorithm guarantees pitch accuracy; AI only optimizes among valid candidates. Review the final fingering for your instrument and personal playing style.</p>
+  </footer>
+  <script src="/app.js?v=1.0.0" defer></script>
+</body>
+</html>
