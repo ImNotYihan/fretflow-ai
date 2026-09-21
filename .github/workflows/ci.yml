@@ -19,3 +19,12 @@ jobs:
           java-version: "17"
       - name: Run tests
         run: ./test.sh
+      - name: Build executable JAR
+        run: ./build.sh
+      - name: Verify packaged command-line conversion
+        run: |
+          java -jar dist/fretflow-ai.jar --version
+          java -jar dist/fretflow-ai.jar \
+            --input examples/mini-riff.musicxml \
+            --output build/smoke.musicxml \
+            --tab build/smoke.txt

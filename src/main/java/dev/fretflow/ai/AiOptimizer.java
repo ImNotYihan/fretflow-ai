@@ -3,7 +3,7 @@ package dev.fretflow.ai;
 import dev.fretflow.model.Fingering;
 import dev.fretflow.model.InstrumentConfig;
 import dev.fretflow.model.ParsedScore;
-import dev.fretflow.web.JsonUtil;
+import dev.fretflow.util.JsonUtil;
 
 import java.net.URI;
 import java.net.http.HttpClient;

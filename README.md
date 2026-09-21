@@ -1,25 +1,27 @@
 # FretFlow AI
 
-Turn electric guitar and bass MusicXML scores into ergonomic, playable TAB fingerings.
+FretFlow AI is a local desktop application that compiles electric-guitar and bass MusicXML scores into ergonomic, playable TAB fingerings. Version 1.0.0 runs directly on the user's computer: it does not start a website, local HTTP server, or browser.
 
-FretFlow first uses a deterministic local engine to guarantee that every fingering produces the correct pitch. Dynamic programming then reduces string skips, awkward stretches, and unnecessary position shifts. Players can optionally enter a DeepSeek or OpenAI API Key to let an LLM refine the result from a set of already validated candidates. No account is required, and API Keys are never stored on disk.
+The deterministic engine guarantees the correct pitch for every generated string/fret position. Dynamic programming then reduces string skips, awkward stretches, and unnecessary position shifts. Optional DeepSeek or OpenAI-compatible refinement can rerank already validated candidates without being allowed to invent impossible fingerings.
 
-## Features
+## Desktop features
 
-- Accepts `.musicxml`, `.xml`, and compressed `.mxl` files
+- Native Java desktop interface for macOS, Windows, and Linux
+- `.musicxml`, `.xml`, and compressed `.mxl` input
 - Guitar tunings: standard, Drop D, and DADGAD
 - Bass tunings: 4-string standard, 4-string Drop D, and 5-string standard
-- Four optimization styles: balanced, beginner, low position, and compact
-- Optional DeepSeek or OpenAI-compatible Chat Completions refinement
-- In-browser ASCII TAB preview and a note-by-note string/fret path
-- Exports MusicXML with `<string>` / `<fret>` technical annotations and TAB staff settings
-- Pure Java with no third-party dependencies, database, or account system
+- Balanced, beginner, low-position, and compact optimization styles
+- Local ASCII TAB preview with score statistics and warnings
+- Annotated MusicXML export with `<string>` / `<fret>` data and TAB staff settings
+- Optional DeepSeek or OpenAI-compatible AI refinement
+- Command-line mode for scripts and batch conversion
+- Pure Java 17 with no third-party dependencies, database, account, browser, or web server
 
-## Quick start
+## Build and run on your computer
 
-Requirement: JDK 17 or newer.
+Install a JDK 17 or newer, then clone the repository.
 
-macOS / Linux:
+macOS or Linux:
 
 ```bash
 git clone https://github.com/ImNotYihan/fretflow-ai.git
@@ -30,32 +32,65 @@ cd fretflow-ai
 Windows:
 
 ```bat
+git clone https://github.com/ImNotYihan/fretflow-ai.git
+cd fretflow-ai
 run.bat
 ```
 
-Your browser opens [http://127.0.0.1:8080](http://127.0.0.1:8080) automatically. Upload `examples/mini-riff.musicxml` to try the complete workflow.
-
-Optional launch flags:
+The launch script compiles the source into `dist/fretflow-ai.jar` and opens the desktop interface. You can also build without launching:
 
 ```bash
-./run.sh --port 9090 --no-browser
-./run.sh --host 0.0.0.0   # Allow LAN access; read the security notes below first.
+./build.sh
+java -jar dist/fretflow-ai.jar
 ```
 
-## AI refinement
+On Windows, use `build.bat` followed by:
 
-1. Select DeepSeek or OpenAI in the web interface.
-2. Enter your own API Key. Leave the model blank to use the default shown in the interface.
+```bat
+java -jar dist\fretflow-ai.jar
+```
+
+## Using the desktop app
+
+1. Choose a `.musicxml`, `.xml`, or `.mxl` score.
+2. Select guitar or bass, the tuning, and an optimization style.
 3. Select **Generate playable TAB**.
+4. Review the local TAB preview and save the ASCII TAB or annotated MusicXML output.
 
-The backend uses the OpenAI-compatible `/chat/completions` protocol. Advanced settings accept a compatible endpoint URL; public endpoints must use HTTPS, while localhost may use HTTP. The model cannot invent arbitrary fret positions—it can only select from candidates whose pitch and string constraints were validated locally.
+The default optimizer is fully offline. If AI refinement is selected, only pitch and validated fingering-candidate context is sent to the configured provider.
 
-> The API Key remains in the current browser field and is forwarded only for the active conversion. FretFlow never writes it to files, a database, or application logs. For an internet-facing deployment, disable client-side keys or add a server-side key proxy, authentication, and rate limiting.
+## Command-line mode
 
-## How the fingering engine works
+Convert a score without opening the interface:
+
+```bash
+java -jar dist/fretflow-ai.jar \
+  --input examples/mini-riff.musicxml \
+  --output build/mini-riff-tab.musicxml \
+  --tab build/mini-riff-tab.txt \
+  --instrument guitar \
+  --tuning standard \
+  --style balanced
+```
+
+If `--output` and `--tab` are omitted, both files are written beside the input score. Run `java -jar dist/fretflow-ai.jar --help` for every option.
+
+For optional AI refinement, keep the API key out of shell history by passing the name of an environment variable:
+
+```bash
+export DEEPSEEK_API_KEY="your-key"
+java -jar dist/fretflow-ai.jar \
+  --input score.musicxml \
+  --ai-provider deepseek \
+  --api-key-env DEEPSEEK_API_KEY
+```
+
+API keys entered in the desktop app remain only in the current process and are never saved to disk or logs.
+
+## How the compiler works
 
 ```text
-MusicXML / MXL
+MusicXML / MXL file
       │
       ▼
 Parse parts, pitches, chords, and rhythmic positions
@@ -64,14 +99,14 @@ Parse parts, pitches, chords, and rhythmic positions
 Enumerate every valid string + fret combination for the tuning
       │
       ▼
-Score local cost: span / string skip / high position / open string
+Score span, string skip, high position, and open-string cost
       │
       ▼
-Dynamic programming minimizes position shifts across the full phrase
+Dynamic programming minimizes position shifts across the phrase
       │
-      ├── Optional AI reranking within validated candidates
+      ├── Optional AI reranking among validated candidates
       ▼
-ASCII TAB + annotated MusicXML
+Desktop preview + ASCII TAB + annotated MusicXML files
 ```
 
 For multi-part scores, FretFlow prefers a part whose name contains Guitar or Bass, then falls back to the part with the most pitched notes. Chord notes are assigned to distinct strings. Notes outside the selected instrument's range produce a warning instead of a fabricated fingering.
@@ -82,27 +117,29 @@ For multi-part scores, FretFlow prefers a part whose name contains Guitar or Bas
 ./test.sh
 ```
 
-The test suite covers MusicXML and MXL parsing, chord grouping, string/fret pitch invariants, TAB annotation export, ASCII rendering, JSON escaping, and the complete conversion pipeline.
+The suite covers MusicXML and MXL parsing, chord grouping, string/fret pitch invariants, TAB annotation export, ASCII rendering, JSON escaping, the complete conversion service, and local command-line file generation. Continuous integration also builds the executable JAR and performs a packaged conversion.
 
 ## Project structure
 
 ```text
 src/main/java/dev/fretflow/
-├── ai/           # DeepSeek/OpenAI-compatible client and response validation
+├── ai/           # Optional DeepSeek/OpenAI-compatible refinement
+├── desktop/      # Native Swing desktop interface
 ├── engine/       # Candidate generation and dynamic programming
 ├── model/        # Score, instrument, and fingering models
 ├── musicxml/     # Secure MXL/MusicXML parsing and TAB annotation export
 ├── render/       # ASCII TAB rendering
-└── web/          # Dependency-free HTTP server
-src/main/resources/web/  # Responsive web interface
-examples/                # Ready-to-upload sample score
+└── util/         # Shared utilities
+examples/         # Ready-to-convert sample score
+build.sh/.bat     # Reproducible local compiler
+run.sh/.bat       # Build and launch the desktop application
 ```
 
 ## Current limitations
 
 - One fretted-instrument part is converted per request. Multi-guitar projects are reduced to the automatically selected part.
 - TAB focuses on string and fret placement. Bends, slides, hammer-ons, pull-offs, and harmonics are not inferred yet.
-- Music notation applications differ slightly in how they import a MusicXML TAB staff. The exported `<technical>` string/fret data is preserved for further editing in MuseScore and other compatible editors.
+- Music notation applications differ slightly in how they import a MusicXML TAB staff. The exported technical string/fret data is preserved for further editing in MuseScore and other compatible editors.
 - AI calls may incur provider charges and send pitch plus fingering-candidate context to that provider.
 
 ## License

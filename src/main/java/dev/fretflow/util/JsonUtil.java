@@ -1,4 +1,4 @@
-package dev.fretflow.web;
+package dev.fretflow.util;
 
 public final class JsonUtil {
     private JsonUtil() { }
@@ -24,4 +24,3 @@ public final class JsonUtil {
         return out.append('"').toString();
     }
 }
-
