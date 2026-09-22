@@ -5,7 +5,7 @@ import dev.fretflow.desktop.DesktopApp;
 import java.awt.GraphicsEnvironment;
 
 public final class Main {
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.0.1";
 
     private Main() { }
 

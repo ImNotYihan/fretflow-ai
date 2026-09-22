@@ -4,6 +4,7 @@ import dev.fretflow.model.NoteEvent;
 import dev.fretflow.model.ParsedScore;
 import dev.fretflow.model.Pitch;
 import dev.fretflow.model.ScoreNote;
+import dev.fretflow.model.Technique;
 import org.w3c.dom.Element;
 
 import java.io.ByteArrayInputStream;
@@ -13,6 +14,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.zip.ZipInputStream;
 
@@ -39,7 +41,7 @@ public final class MusicXmlParser {
         var warnings = new ArrayList<String>();
         if (parts.size() > 1) warnings.add("The score contains " + parts.size() + " parts; converted “" + partName + "”.");
         var events = parseEvents(selected, warnings);
-        if (events.isEmpty()) throw new IllegalArgumentException("The selected part does not contain pitched notes");
+        if (events.isEmpty()) throw new IllegalArgumentException("The selected part does not contain playable notes");
         return new ParsedScore(title, partId, partName, events, xml, warnings);
     }
 
@@ -57,14 +59,16 @@ public final class MusicXmlParser {
         return parts.stream().max(Comparator.comparingInt(part -> {
             String name = partNames.getOrDefault(part.getAttribute("id"), "").toLowerCase();
             int frettedBonus = name.matches(".*(guitar|bass|\\u5409\\u4ed6|\\u8d1d\\u65af).*" ) ? 1_000_000 : 0;
-            return frettedBonus + countPitchedNotes(part);
+            return frettedBonus + countPlayableNotes(part);
         })).orElse(parts.get(0));
     }
 
-    private int countPitchedNotes(Element part) {
+    private int countPlayableNotes(Element part) {
         int count = 0;
         for (var measure : XmlSupport.children(part, "measure")) {
-            for (var note : XmlSupport.children(measure, "note")) if (XmlSupport.child(note, "pitch") != null) count++;
+            for (var note : XmlSupport.children(measure, "note")) {
+                if (XmlSupport.child(note, "pitch") != null || isMutedNote(note)) count++;
+            }
         }
         return count;
     }
@@ -73,6 +77,7 @@ public final class MusicXmlParser {
         var result = new ArrayList<NoteEvent>();
         int ordinal = 0;
         int eventIndex = 0;
+        int skippedUnpitched = 0;
         for (var measure : XmlSupport.children(part, "measure")) {
             String number = measure.getAttribute("number");
             if (number.isBlank()) number = String.valueOf(result.size() + 1);
@@ -97,13 +102,23 @@ public final class MusicXmlParser {
                 boolean chord = XmlSupport.child(element, "chord") != null;
                 int start = chord ? lastStart : cursor;
                 var pitchElement = XmlSupport.child(element, "pitch");
+                var techniques = parseTechniques(element);
+                Pitch pitch = null;
                 if (pitchElement != null) {
                     String step = XmlSupport.childText(pitchElement, "step", "C");
                     int alter = XmlSupport.childInt(pitchElement, "alter", 0);
                     int octave = XmlSupport.childInt(pitchElement, "octave", 4);
-                    var note = new ScoreNote(ordinal++, Pitch.of(step, alter, octave));
+                    pitch = Pitch.of(step, alter, octave);
+                }
+                boolean muted = techniques.stream().anyMatch(technique ->
+                        technique.kind() == Technique.Kind.DEAD_NOTE || technique.kind() == Technique.Kind.GHOST_NOTE);
+                if (pitch != null || muted) {
+                    var sourcePosition = sourcePosition(element);
+                    var note = new ScoreNote(ordinal++, pitch, techniques, sourcePosition.stringNumber(), sourcePosition.fret());
                     final int eventDuration = duration;
                     byOffset.computeIfAbsent(start, ignored -> new EventBuilder(start, eventDuration)).notes.add(note);
+                } else if (XmlSupport.child(element, "unpitched") != null) {
+                    skippedUnpitched++;
                 }
                 if (!chord) {
                     lastStart = start;
@@ -119,7 +134,119 @@ public final class MusicXmlParser {
         if (result.stream().anyMatch(e -> e.notes().size() > 6)) {
             warnings.add("Some chords contain more than six notes and may not fit the selected instrument.");
         }
+        if (skippedUnpitched > 0) {
+            warnings.add("Skipped " + skippedUnpitched + " unpitched note(s) without a dead/ghost-note mark.");
+        }
         return result;
+    }
+
+    private List<Technique> parseTechniques(Element note) {
+        var techniques = new ArrayList<Technique>();
+        Element notehead = XmlSupport.child(note, "notehead");
+        if (notehead != null) {
+            String shape = normalizeMark(notehead.getTextContent());
+            boolean parenthesized = notehead.getAttribute("parentheses").equalsIgnoreCase("yes");
+            if (shape.equals("x") || shape.equals("circle x") || shape.equals("square x")) {
+                addTechnique(techniques, new Technique(parenthesized
+                        ? Technique.Kind.GHOST_NOTE : Technique.Kind.DEAD_NOTE));
+            } else if (parenthesized) {
+                addTechnique(techniques, new Technique(Technique.Kind.GHOST_NOTE));
+            }
+        }
+
+        Element notations = XmlSupport.child(note, "notations");
+        if (notations == null) return List.copyOf(techniques);
+        Element technical = XmlSupport.child(notations, "technical");
+        if (technical != null) {
+            for (Element mark : XmlSupport.children(technical, "hammer-on")) {
+                addTechnique(techniques, connection(Technique.Kind.HAMMER_ON, mark));
+            }
+            for (Element mark : XmlSupport.children(technical, "pull-off")) {
+                addTechnique(techniques, connection(Technique.Kind.PULL_OFF, mark));
+            }
+            for (Element mark : XmlSupport.children(technical, "harmonic")) {
+                String detail = XmlSupport.child(mark, "artificial") != null ? "artificial"
+                        : XmlSupport.child(mark, "natural") != null ? "natural" : "";
+                addTechnique(techniques, new Technique(Technique.Kind.HARMONIC,
+                        Technique.Phase.SINGLE, 1, detail));
+            }
+            if (XmlSupport.child(technical, "snap-pizzicato") != null) {
+                addTechnique(techniques, new Technique(Technique.Kind.SLAP,
+                        Technique.Phase.SINGLE, 1, "snap-pizzicato"));
+            }
+            for (Element mark : XmlSupport.children(technical, "pluck")) {
+                addNamedTechnique(techniques, mark.getTextContent(), false);
+            }
+            for (Element mark : XmlSupport.children(technical, "other-technical")) {
+                addNamedTechnique(techniques, mark.getTextContent(), true);
+            }
+        }
+        for (Element mark : XmlSupport.children(notations, "slide")) {
+            addTechnique(techniques, connection(Technique.Kind.SLIDE, mark));
+        }
+        return List.copyOf(techniques);
+    }
+
+    private Technique connection(Technique.Kind kind, Element mark) {
+        return new Technique(kind, Technique.phaseFromMusicXml(mark.getAttribute("type")),
+                integerAttribute(mark, "number", 1), mark.getTextContent().trim());
+    }
+
+    private void addNamedTechnique(List<Technique> techniques, String value, boolean allowShortNames) {
+        String mark = normalizeMark(value);
+        if (mark.equals("slap") || mark.equals("slap thumb") || mark.equals("thumb")
+                || mark.equals("thumb slap") || (allowShortNames && (mark.equals("s") || mark.equals("t")))) {
+            addTechnique(techniques, new Technique(Technique.Kind.SLAP));
+        } else if (mark.equals("pop") || mark.equals("popping") || (allowShortNames && mark.equals("p"))) {
+            addTechnique(techniques, new Technique(Technique.Kind.POP));
+        } else if (allowShortNames && (mark.equals("dead") || mark.equals("dead note")
+                || mark.equals("muted") || mark.equals("mute") || mark.equals("x"))) {
+            addTechnique(techniques, new Technique(Technique.Kind.DEAD_NOTE));
+        } else if (allowShortNames && (mark.equals("ghost") || mark.equals("ghost note") || mark.equals("(x)"))) {
+            addTechnique(techniques, new Technique(Technique.Kind.GHOST_NOTE));
+        }
+    }
+
+    private void addTechnique(List<Technique> techniques, Technique candidate) {
+        boolean duplicate = techniques.stream().anyMatch(existing -> existing.kind() == candidate.kind()
+                && existing.phase() == candidate.phase() && existing.number() == candidate.number());
+        if (!duplicate) techniques.add(candidate);
+    }
+
+    private SourcePosition sourcePosition(Element note) {
+        Element notations = XmlSupport.child(note, "notations");
+        Element technical = notations == null ? null : XmlSupport.child(notations, "technical");
+        if (technical == null) return new SourcePosition(null, null);
+        Element string = XmlSupport.child(technical, "string");
+        Element fret = XmlSupport.child(technical, "fret");
+        return new SourcePosition(integerText(string), integerText(fret));
+    }
+
+    private Integer integerText(Element element) {
+        if (element == null) return null;
+        try {
+            return Integer.valueOf(element.getTextContent().trim());
+        } catch (NumberFormatException ignored) {
+            return null;
+        }
+    }
+
+    private int integerAttribute(Element element, String name, int fallback) {
+        try {
+            return Integer.parseInt(element.getAttribute(name));
+        } catch (NumberFormatException ignored) {
+            return fallback;
+        }
+    }
+
+    private String normalizeMark(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT)
+                .replace('-', ' ').replace('_', ' ').replaceAll("\\s+", " ");
+    }
+
+    private boolean isMutedNote(Element note) {
+        return parseTechniques(note).stream().anyMatch(technique ->
+                technique.kind() == Technique.Kind.DEAD_NOTE || technique.kind() == Technique.Kind.GHOST_NOTE);
     }
 
     private String scoreTitle(Element root) {
@@ -174,4 +301,6 @@ public final class MusicXmlParser {
             this.duration = duration;
         }
     }
+
+    private record SourcePosition(Integer stringNumber, Integer fret) { }
 }

@@ -6,6 +6,7 @@ import dev.fretflow.model.InstrumentConfig;
 import dev.fretflow.model.NoteEvent;
 import dev.fretflow.model.ParsedScore;
 import dev.fretflow.model.ScoreNote;
+import dev.fretflow.model.Technique;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -24,23 +25,46 @@ public final class FingeringEngine {
         for (var event : score.events()) {
             var candidates = candidatesFor(event, instrument, style);
             if (candidates.isEmpty()) {
-                String pitches = event.notes().stream().map(n -> n.pitch().displayName()).reduce((a, b) -> a + ", " + b).orElse("note");
+                String pitches = event.notes().stream().map(ScoreNote::displayName)
+                        .reduce((a, b) -> a + ", " + b).orElse("note");
                 warnings.add("Measure " + event.measure() + ": no valid fingering for " + pitches + ".");
                 candidates = List.of(new Fingering(event.index(), List.of(), 500));
             }
             allCandidates.add(candidates);
         }
-        return new EngineResult(dynamicProgramming(allCandidates, style), allCandidates, warnings);
+        return new EngineResult(dynamicProgramming(allCandidates, score.events(), style), allCandidates, warnings);
     }
 
     public List<Fingering> candidatesFor(NoteEvent event, InstrumentConfig instrument, String style) {
         var noteOptions = new ArrayList<List<FretPosition>>();
         for (ScoreNote note : event.notes()) {
             var options = new ArrayList<FretPosition>();
+            if (note.pitch() == null) {
+                if (!note.isMuted()) return List.of();
+                int fret = note.sourceFret() == null ? 0 : note.sourceFret();
+                if (note.sourceString() != null) {
+                    if (note.sourceString() >= 1 && note.sourceString() <= instrument.stringCount()
+                            && fret >= 0 && fret <= instrument.maxFret()) {
+                        options.add(new FretPosition(note.sourceString(), fret, note));
+                    }
+                } else {
+                    for (int stringNumber = 1; stringNumber <= instrument.stringCount(); stringNumber++) {
+                        if (fret >= 0 && fret <= instrument.maxFret()) {
+                            options.add(new FretPosition(stringNumber, fret, note));
+                        }
+                    }
+                }
+                if (options.isEmpty()) return List.of();
+                noteOptions.add(options);
+                continue;
+            }
+            boolean preserveSourcePosition = note.isMuted() || note.hasTechnique(Technique.Kind.HARMONIC);
             for (int lowIndex = 0; lowIndex < instrument.stringCount(); lowIndex++) {
                 int fret = note.pitch().midi() - instrument.openMidi().get(lowIndex);
                 if (fret >= 0 && fret <= instrument.maxFret()) {
                     int stringNumber = instrument.stringCount() - lowIndex;
+                    if (preserveSourcePosition && note.sourceString() != null && note.sourceString() != stringNumber) continue;
+                    if (preserveSourcePosition && note.sourceFret() != null && note.sourceFret() != fret) continue;
                     options.add(new FretPosition(stringNumber, fret, note));
                 }
             }
@@ -51,7 +75,7 @@ public final class FingeringEngine {
         var raw = new ArrayList<List<FretPosition>>();
         buildCombinations(noteOptions, 0, new ArrayList<>(), new HashSet<>(), raw);
         return raw.stream()
-                .map(positions -> new Fingering(event.index(), positions, localCost(positions, style)))
+                .map(positions -> new Fingering(event.index(), positions, localCost(positions, style, instrument)))
                 .sorted(Comparator.comparingDouble(Fingering::localCost))
                 .limit(MAX_CANDIDATES)
                 .toList();
@@ -73,7 +97,7 @@ public final class FingeringEngine {
         }
     }
 
-    private double localCost(List<FretPosition> positions, String styleName) {
+    private double localCost(List<FretPosition> positions, String styleName, InstrumentConfig instrument) {
         String style = styleName == null ? "balanced" : styleName.toLowerCase(Locale.ROOT);
         var frets = positions.stream().filter(p -> p.fret() > 0).mapToInt(FretPosition::fret).toArray();
         int span = frets.length < 2 ? 0 : Arrays.stream(frets).max().orElse(0) - Arrays.stream(frets).min().orElse(0);
@@ -91,10 +115,18 @@ public final class FingeringEngine {
             case "compact" -> cost += span * 2.4 + open * 0.15;
             default -> cost += average * 0.07 - open * 0.2;
         }
+        for (var position : positions) {
+            if (position.note().hasTechnique(Technique.Kind.SLAP)) {
+                cost += (instrument.stringCount() - position.stringNumber()) * 0.35;
+            }
+            if (position.note().hasTechnique(Technique.Kind.POP)) {
+                cost += (position.stringNumber() - 1) * 0.35;
+            }
+        }
         return cost;
     }
 
-    private List<Fingering> dynamicProgramming(List<List<Fingering>> layers, String style) {
+    private List<Fingering> dynamicProgramming(List<List<Fingering>> layers, List<NoteEvent> events, String style) {
         if (layers.isEmpty()) return List.of();
         var costs = new ArrayList<double[]>();
         var previous = new ArrayList<int[]>();
@@ -112,7 +144,8 @@ public final class FingeringEngine {
                 for (int j = 0; j < currentLayer.size(); j++) {
                     for (int k = 0; k < priorLayer.size(); k++) {
                         double candidate = priorCosts[k] + currentLayer.get(j).localCost()
-                                + transitionCost(priorLayer.get(k), currentLayer.get(j), style);
+                                + transitionCost(priorLayer.get(k), currentLayer.get(j),
+                                events.get(i - 1), events.get(i), style);
                         if (candidate < currentCosts[j]) {
                             currentCosts[j] = candidate;
                             currentPrevious[j] = k;
@@ -134,7 +167,8 @@ public final class FingeringEngine {
         return List.copyOf(reversed);
     }
 
-    private double transitionCost(Fingering from, Fingering to, String styleName) {
+    private double transitionCost(Fingering from, Fingering to, NoteEvent fromEvent, NoteEvent toEvent,
+                                  String styleName) {
         if (from.positions().isEmpty() || to.positions().isEmpty()) return 0;
         double shift = Math.abs(from.handPosition() - to.handPosition());
         double weight = "beginner".equalsIgnoreCase(styleName) ? 1.9 : 1.25;
@@ -142,7 +176,33 @@ public final class FingeringEngine {
         if (shift > 5) cost += (shift - 5) * 2.5;
         double fromString = from.positions().stream().mapToInt(FretPosition::stringNumber).average().orElse(1);
         double toString = to.positions().stream().mapToInt(FretPosition::stringNumber).average().orElse(1);
-        return cost + Math.abs(fromString - toString) * 0.25;
+        cost += Math.abs(fromString - toString) * 0.25;
+        return cost + connectionCost(from, to, fromEvent, toEvent);
+    }
+
+    private double connectionCost(Fingering from, Fingering to, NoteEvent fromEvent, NoteEvent toEvent) {
+        double cost = 0;
+        for (ScoreNote fromNote : fromEvent.notes()) {
+            for (Technique start : fromNote.techniques()) {
+                if (!start.startsConnection()) continue;
+                for (ScoreNote toNote : toEvent.notes()) {
+                    boolean stops = toNote.techniques().stream().anyMatch(stop -> stop.stopsConnection()
+                            && stop.kind() == start.kind() && stop.number() == start.number());
+                    if (!stops) continue;
+                    FretPosition fromPosition = positionFor(from, fromNote.ordinal());
+                    FretPosition toPosition = positionFor(to, toNote.ordinal());
+                    if (fromPosition == null || toPosition == null) continue;
+                    cost += fromPosition.stringNumber() == toPosition.stringNumber() ? -0.75 : 10_000;
+                }
+            }
+        }
+        return cost;
+    }
+
+    private FretPosition positionFor(Fingering fingering, int ordinal) {
+        return fingering.positions().stream()
+                .filter(position -> position.note().ordinal() == ordinal)
+                .findFirst().orElse(null);
     }
 
     private int indexOfMinimum(double[] values) {

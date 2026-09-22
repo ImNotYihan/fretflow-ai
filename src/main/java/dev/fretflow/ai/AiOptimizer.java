@@ -1,8 +1,11 @@
 package dev.fretflow.ai;
 
 import dev.fretflow.model.Fingering;
+import dev.fretflow.model.FretPosition;
 import dev.fretflow.model.InstrumentConfig;
 import dev.fretflow.model.ParsedScore;
+import dev.fretflow.model.ScoreNote;
+import dev.fretflow.model.Technique;
 import dev.fretflow.util.JsonUtil;
 
 import java.net.URI;
@@ -48,11 +51,16 @@ public final class AiOptimizer {
                     }
                 }
             }
+            int repairedConnections = repairTechniqueConnections(score, selected, baseline);
             var warnings = new ArrayList<String>();
             if (score.events().size() > MAX_AI_EVENTS) {
                 warnings.add("AI optimized the first " + MAX_AI_EVENTS + " events; the remaining events use the local ergonomic algorithm.");
             }
             if (accepted == 0) warnings.add("The AI response contained no valid candidate choices; local fingerings were retained.");
+            if (repairedConnections > 0) {
+                warnings.add("AI choices that changed strings inside " + repairedConnections
+                        + " legato/slide pair(s) were replaced with technique-safe fingerings.");
+            }
             return new AiResult(List.copyOf(selected), "AI refined · " + model, warnings);
         } catch (Exception error) {
             return new AiResult(baseline, "AI fallback · Smart algorithm",
@@ -89,13 +97,16 @@ public final class AiOptimizer {
         var prompt = new StringBuilder();
         prompt.append("You are an expert ").append(instrument.type()).append(" fingering editor. ")
                 .append("Choose exactly one listed candidate per musical event. Optimize for a natural hand shape, minimal position shifts, ")
-                .append("playability for a ").append(style).append(" player, and musical phrasing. Never invent a candidate. ")
+                .append("playability for a ").append(style).append(" player, and musical phrasing. Keep connected hammer-ons, pull-offs, ")
+                .append("and slides on the same string. Never invent a candidate. ")
                 .append("Return only lines in the form E<number>=<option>, with no prose.\n")
                 .append("Tuning low-to-high MIDI: ").append(instrument.openMidi()).append(".\n");
         for (int eventIndex = start; eventIndex < end; eventIndex++) {
             var event = score.events().get(eventIndex);
             prompt.append('E').append(eventIndex).append(" measure=").append(event.measure()).append(" notes=")
-                    .append(event.notes().stream().map(n -> n.pitch().displayName()).toList()).append(" options ");
+                    .append(event.notes().stream().map(note -> note.displayName()
+                            + (note.techniques().isEmpty() ? "" : note.techniques().stream()
+                            .map(technique -> technique.kind().name()).toList())).toList()).append(" options ");
             int optionLimit = Math.min(OPTIONS_PER_EVENT, candidates.get(eventIndex).size());
             for (int option = 0; option < optionLimit; option++) {
                 if (option > 0) prompt.append(" | ");
@@ -104,6 +115,43 @@ public final class AiOptimizer {
             prompt.append('\n');
         }
         return prompt.toString();
+    }
+
+    private int repairTechniqueConnections(ParsedScore score, List<Fingering> selected, List<Fingering> baseline) {
+        int repaired = 0;
+        for (int eventIndex = 1; eventIndex < score.events().size(); eventIndex++) {
+            if (connectionsMatch(score.events().get(eventIndex - 1).notes(), score.events().get(eventIndex).notes(),
+                    selected.get(eventIndex - 1), selected.get(eventIndex))) continue;
+            selected.set(eventIndex - 1, baseline.get(eventIndex - 1));
+            selected.set(eventIndex, baseline.get(eventIndex));
+            repaired++;
+        }
+        return repaired;
+    }
+
+    private boolean connectionsMatch(List<ScoreNote> fromNotes, List<ScoreNote> toNotes,
+                                     Fingering from, Fingering to) {
+        for (ScoreNote fromNote : fromNotes) {
+            for (Technique start : fromNote.techniques()) {
+                if (!start.startsConnection()) continue;
+                for (ScoreNote toNote : toNotes) {
+                    boolean matchingStop = toNote.techniques().stream().anyMatch(stop -> stop.stopsConnection()
+                            && stop.kind() == start.kind() && stop.number() == start.number());
+                    if (!matchingStop) continue;
+                    FretPosition fromPosition = positionFor(from, fromNote.ordinal());
+                    FretPosition toPosition = positionFor(to, toNote.ordinal());
+                    if (fromPosition != null && toPosition != null
+                            && fromPosition.stringNumber() != toPosition.stringNumber()) return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private FretPosition positionFor(Fingering fingering, int ordinal) {
+        return fingering.positions().stream()
+                .filter(position -> position.note().ordinal() == ordinal)
+                .findFirst().orElse(null);
     }
 
     private String call(URI endpoint, String model, String apiKey, String prompt) throws Exception {

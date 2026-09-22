@@ -4,6 +4,8 @@ import dev.fretflow.model.Fingering;
 import dev.fretflow.model.FretPosition;
 import dev.fretflow.model.InstrumentConfig;
 import dev.fretflow.model.ParsedScore;
+import dev.fretflow.model.ScoreNote;
+import dev.fretflow.model.Technique;
 import org.w3c.dom.Document;
 import org.w3c.dom.Element;
 import org.w3c.dom.Node;
@@ -16,6 +18,7 @@ import javax.xml.transform.stream.StreamResult;
 import java.io.ByteArrayOutputStream;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 public final class MusicXmlAnnotator {
@@ -33,9 +36,12 @@ public final class MusicXmlAnnotator {
         int ordinal = 0;
         for (var measure : XmlSupport.children(part, "measure")) {
             for (var note : XmlSupport.children(measure, "note")) {
-                if (XmlSupport.child(note, "pitch") == null) continue;
+                if (!isPlayableSourceNote(note)) continue;
                 var position = byOrdinal.get(ordinal++);
-                if (position != null) addTechnical(document, note, position);
+                if (position != null) {
+                    addTechnical(document, note, position);
+                    ensureTechniqueNotation(document, note, position.note());
+                }
             }
         }
         configureTabStaff(document, root, part, score.partId(), instrument);
@@ -73,6 +79,81 @@ public final class MusicXmlAnnotator {
         removeChildren(technical, "fret");
         appendText(document, technical, "string", String.valueOf(position.stringNumber()));
         appendText(document, technical, "fret", String.valueOf(position.fret()));
+    }
+
+    private void ensureTechniqueNotation(Document document, Element note, ScoreNote scoreNote) {
+        if (scoreNote.hasTechnique(Technique.Kind.DEAD_NOTE)
+                || scoreNote.hasTechnique(Technique.Kind.GHOST_NOTE)) {
+            Element notehead = XmlSupport.child(note, "notehead");
+            if (notehead == null) {
+                notehead = document.createElement("notehead");
+                Node insertBefore = firstChildNamed(note, "notehead-text", "staff", "beam", "notations",
+                        "lyric", "play", "listen");
+                if (insertBefore == null) note.appendChild(notehead); else note.insertBefore(notehead, insertBefore);
+            }
+            notehead.setTextContent("x");
+            if (scoreNote.hasTechnique(Technique.Kind.GHOST_NOTE)) {
+                notehead.setAttribute("parentheses", "yes");
+            }
+        }
+
+        Element notations = XmlSupport.child(note, "notations");
+        Element technical = notations == null ? null : XmlSupport.child(notations, "technical");
+        if (technical == null) return;
+        if (scoreNote.hasTechnique(Technique.Kind.SLAP) && !containsNamedTechnique(technical, Technique.Kind.SLAP)) {
+            Element mark = document.createElement("other-technical");
+            mark.setAttribute("placement", "above");
+            mark.setTextContent("S");
+            technical.appendChild(mark);
+        }
+        if (scoreNote.hasTechnique(Technique.Kind.POP) && !containsNamedTechnique(technical, Technique.Kind.POP)) {
+            Element mark = document.createElement("other-technical");
+            mark.setAttribute("placement", "above");
+            mark.setTextContent("P");
+            technical.appendChild(mark);
+        }
+    }
+
+    private boolean containsNamedTechnique(Element technical, Technique.Kind kind) {
+        if (kind == Technique.Kind.SLAP && XmlSupport.child(technical, "snap-pizzicato") != null) return true;
+        for (Element mark : XmlSupport.children(technical, "pluck")) {
+            String value = normalizeMark(mark.getTextContent());
+            if (kind == Technique.Kind.SLAP && (value.equals("slap") || value.equals("thumb") || value.equals("t"))) return true;
+            if (kind == Technique.Kind.POP && value.equals("pop")) return true;
+        }
+        for (Element mark : XmlSupport.children(technical, "other-technical")) {
+            String value = normalizeMark(mark.getTextContent());
+            if (kind == Technique.Kind.SLAP && (value.equals("slap") || value.equals("thumb")
+                    || value.equals("s") || value.equals("t"))) return true;
+            if (kind == Technique.Kind.POP && (value.equals("pop") || value.equals("p"))) return true;
+        }
+        return false;
+    }
+
+    private boolean isPlayableSourceNote(Element note) {
+        if (XmlSupport.child(note, "pitch") != null) return true;
+        if (XmlSupport.child(note, "unpitched") == null) return false;
+        Element notehead = XmlSupport.child(note, "notehead");
+        if (notehead != null) {
+            String shape = normalizeMark(notehead.getTextContent());
+            if (shape.equals("x") || shape.equals("circle x") || shape.equals("square x")
+                    || notehead.getAttribute("parentheses").equalsIgnoreCase("yes")) return true;
+        }
+        Element notations = XmlSupport.child(note, "notations");
+        Element technical = notations == null ? null : XmlSupport.child(notations, "technical");
+        if (technical == null) return false;
+        for (Element mark : XmlSupport.children(technical, "other-technical")) {
+            String value = normalizeMark(mark.getTextContent());
+            if (value.equals("dead") || value.equals("dead note") || value.equals("muted")
+                    || value.equals("mute") || value.equals("x") || value.equals("ghost")
+                    || value.equals("ghost note") || value.equals("(x)")) return true;
+        }
+        return false;
+    }
+
+    private String normalizeMark(String value) {
+        return value == null ? "" : value.trim().toLowerCase(Locale.ROOT)
+                .replace('-', ' ').replace('_', ' ').replaceAll("\\s+", " ");
     }
 
     private void configureTabStaff(Document document, Element root, Element part, String partId, InstrumentConfig instrument) {
